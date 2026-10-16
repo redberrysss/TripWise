@@ -1,0 +1,34 @@
+package com.portfolio.tripwise
+import android.app.Application
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.room.*
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import java.util.UUID
+@Entity data class Trip(@PrimaryKey val id:String=UUID.randomUUID().toString(),val destination:String,val start:String,val days:Int,val budget:Double,val previous:Boolean=false)
+@Entity data class PlanItem(@PrimaryKey val id:String=UUID.randomUUID().toString(),val tripId:String,val day:Int,val title:String,val time:String)
+@Entity data class Expense(@PrimaryKey val id:String=UUID.randomUUID().toString(),val tripId:String,val title:String,val category:String,val amount:Double)
+@Dao interface TripDao{@Query("SELECT * FROM Trip ORDER BY previous,start") fun trips():Flow<List<Trip>>;@Query("SELECT * FROM PlanItem WHERE tripId=:id ORDER BY day,time") fun plan(id:String):Flow<List<PlanItem>>;@Query("SELECT * FROM Expense WHERE tripId=:id") fun expenses(id:String):Flow<List<Expense>>;@Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun trip(t:Trip);@Insert suspend fun item(p:PlanItem);@Insert suspend fun expense(e:Expense);@Query("SELECT COUNT(*) FROM Trip") suspend fun count():Int}
+@Database(entities=[Trip::class,PlanItem::class,Expense::class],version=1) abstract class TripDb:RoomDatabase(){abstract fun dao():TripDao}
+class TripRepository(private val d:TripDao){val trips=d.trips();suspend fun seed(){if(d.count()==0){val t=Trip(destination="Kyoto, Japan",start="18 Nov",days=6,budget=1800.0);d.trip(t);d.item(PlanItem(tripId=t.id,day=1,title="Fushimi Inari walk",time="09:00"));d.item(PlanItem(tripId=t.id,day=2,title="Arashiyama bamboo grove",time="08:30"));d.expense(Expense(tripId=t.id,title="Hotel deposit",category="Stay",amount=420.0));d.trip(Trip(destination="Penang, Malaysia",start="02 Aug",days=3,budget=500.0,previous=true))}};fun plan(id:String)=d.plan(id);fun expenses(id:String)=d.expenses(id);suspend fun addExpense(id:String,title:String,category:String,amount:Double){if(title.isNotBlank()&&amount>0)d.expense(Expense(tripId=id,title=title,category=category,amount=amount))}}
+data class TripState(val trips: List<Trip> = emptyList(), val selected: Trip? = null, val items: List<PlanItem> = emptyList(), val expenses: List<Expense> = emptyList())
+class TripViewModel(app:Application):AndroidViewModel(app){private val r=TripRepository(Room.databaseBuilder(app,TripDb::class.java,"tripwise.db").build().dao());private val selected=MutableStateFlow<Trip?>(null);val state=combine(r.trips,selected.flatMapLatest{t->if(t==null)flowOf(emptyList())else r.plan(t.id)},selected.flatMapLatest{t->if(t==null)flowOf(emptyList())else r.expenses(t.id)},selected){ts,p,e,s->TripState(ts,s?:ts.firstOrNull(),p,e)}.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),TripState());init{viewModelScope.launch{r.seed()}};fun choose(t:Trip)=selected.value=t;fun addExpense(title:String,cat:String,amount:String){selected.value?.let{t->viewModelScope.launch{r.addExpense(t.id,title,cat,amount.toDoubleOrNull()?:0.0)}}}}
+class MainActivity:ComponentActivity(){override fun onCreate(b:Bundle?){super.onCreate(b);setContent{MaterialTheme(colorScheme=lightColorScheme(primary=Color(0xFF007C85),secondary=Color(0xFF267DB8))){val vm=androidx.lifecycle.viewmodel.compose.viewModel<TripViewModel>();TripApp(vm)}}}}
+@Composable fun TripApp(vm:TripViewModel){val s by vm.state.collectAsStateWithLifecycle();var tab by remember{mutableIntStateOf(0)};Scaffold(topBar={TopAppBar(title={Text("TripWise")})},bottomBar={NavigationBar{listOf("Trips","Plan","Budget").forEachIndexed{i,x->NavigationBarItem(tab==i,{tab=i},icon={Text((i+1).toString())},label={Text(x)})}}}){p->Box(Modifier.padding(p)){when(tab){0->Trips(s,vm);1->Plan(s);else->Budget(s,vm)}}}}
+@Composable fun Trips(s:TripState,vm:TripViewModel){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text("Your journeys",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)};items(s.trips){t->Card(onClick={vm.choose(t)},colors=CardDefaults.cardColors(containerColor=if(t==s.selected)MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant)){Column(Modifier.padding(16.dp)){Text(t.destination,style=MaterialTheme.typography.titleLarge);Text("${t.start} · ${t.days} days · Budget $${t.budget}");Text(if(t.previous)"Completed trip" else "Upcoming trip")}}};item{Text("Discovery & weather",style=MaterialTheme.typography.titleMedium)};item{Text("Offline mode: configure a legitimate weather/destination API key to load live information. No simulated live data is shown.")};item{Text("Map fallback: ${s.selected?.destination?:"select a trip"} is saved as a destination; add a Maps SDK key to render an interactive map.")}}}
+@Composable fun Plan(s:TripState){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text(s.selected?.destination?:"Select a trip",style=MaterialTheme.typography.headlineSmall)};items(s.items){x->Card{Text("Day ${x.day} · ${x.time}\n${x.title}",Modifier.padding(16.dp))}};if(s.items.isEmpty())item{Text("No itinerary selected yet.")}}}
+@Composable fun Budget(s:TripState,vm:TripViewModel){var title by remember{mutableStateOf("")};var amount by remember{mutableStateOf("")};val spent=s.expenses.sumOf{it.amount};val budget=s.selected?.budget?:0.0;LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Text("Budget",style=MaterialTheme.typography.headlineSmall)};item{Text("Planned $${"%.0f".format(budget)} · Actual $${"%.0f".format(spent)} · Remaining $${"%.0f".format(budget-spent)}")};item{LinearProgressIndicator(progress={if(budget==0.0)0f else (spent/budget).toFloat().coerceAtMost(1f)},Modifier.fillMaxWidth())};items(s.expenses){e->ListItem(headlineContent={Text(e.title)},supportingContent={Text(e.category)},trailingContent={Text("$${e.amount}")})};item{OutlinedTextField(title,{title=it},label={Text("Expense")},modifier=Modifier.fillMaxWidth())};item{OutlinedTextField(amount,{amount=it},label={Text("Amount")},modifier=Modifier.fillMaxWidth())};item{Button(onClick={vm.addExpense(title,"Other",amount);title="";amount=""},enabled=s.selected!=null){Text("Add expense")}}}}
